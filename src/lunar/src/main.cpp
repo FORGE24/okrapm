@@ -659,7 +659,8 @@ int main(int argc, char* argv[]) {
             std::string url = raw_args[3];
             std::string type = (raw_args.size() >= 5) ? raw_args[4] : "";
             if (type.empty()) {
-                if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+                if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0 ||
+                    url.rfind("file://", 0) == 0) {
                     type = "remote";
                 } else {
                     type = "local";

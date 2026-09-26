@@ -1,5 +1,7 @@
 # OkraPM / Lunar
 
+Okra 的全部文档在总仓库 `git@github.com:OkraLinux/DOCS.git`。本文件只保留这个仓库的构建和命令入口。
+
 OkraPM 是 Okra Rolling Linux 的用户态软件包管理工具链。项目提供：
 
 - `lunar`：依赖解析、事务安装、软件仓库同步和系统升级；

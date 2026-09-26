@@ -31,22 +31,40 @@ bool verify_sidecar(const std::string& path) {
 
 bool copy_payload(const fs::path& payload, const fs::path& root, std::vector<fs::path>& created) {
     std::error_code ec;
-    for (const auto& entry : fs::recursive_directory_iterator(payload, ec)) {
-        if (ec) return false;
+    fs::recursive_directory_iterator it(
+        payload, fs::directory_options::skip_permission_denied, ec);
+    if (ec) return false;
+    fs::recursive_directory_iterator end;
+    for (; it != end; it.increment(ec)) {
+        if (ec) {
+            ec.clear();
+            continue;
+        }
+        const auto& entry = *it;
         auto rel = fs::relative(entry.path(), payload, ec);
-        if (ec || rel.empty() || rel.string().find("..") == 0) return false;
+        if (ec || rel.empty() || rel.native().find("..") != std::string::npos) {
+            return false;
+        }
         auto dest = root / rel;
         if (entry.is_directory()) {
             fs::create_directories(dest, ec);
             if (ec) return false;
-        } else if (entry.is_regular_file() || entry.is_symlink()) {
-            if (fs::exists(dest, ec)) return false;
-            fs::create_directories(dest.parent_path(), ec);
-            if (ec) return false;
-            fs::copy(entry.path(), dest, fs::copy_options::copy_symlinks, ec);
-            if (ec) return false;
-            created.push_back(dest);
+            continue;
         }
+        fs::create_directories(dest.parent_path(), ec);
+        if (ec) return false;
+        if (fs::exists(dest, ec) || fs::is_symlink(dest)) {
+            fs::remove(dest, ec);
+        }
+        if (entry.is_symlink()) {
+            fs::create_symlink(fs::read_symlink(entry.path(), ec), dest, ec);
+        } else if (entry.is_regular_file()) {
+            fs::copy_file(entry.path(), dest, fs::copy_options::overwrite_existing, ec);
+        } else {
+            continue;
+        }
+        if (ec) return false;
+        created.push_back(dest);
     }
     return true;
 }
@@ -501,9 +519,31 @@ bool LunarCore::commit_transaction(Transaction& txn) {
                     auto repo = repo_mgr_->get_repository_for_object(op.target());
                     if (repo) {
                         auto art_path = repo->fetch_artifact(op.target());
-                        if (art_path && fs::exists(*art_path)) {
-                            ArtifactExtractor::extract(*art_path, "/");
+                        if (!art_path || !fs::exists(*art_path)) {
+                            txn.advance_state(TransactionState::Failed, "Failed to fetch artifact for " + op.target().full_name());
+                            txn.advance_state(TransactionState::RolledBack);
+                            return false;
                         }
+                        auto staging = fs::temp_directory_path() / ("lunar-install-" + std::to_string(txn.id()) + "-" + op.target().name());
+                        std::vector<fs::path> created;
+                        bool extracted = ArtifactExtractor::extract(*art_path, staging.string());
+                        fs::path payload = fs::exists(staging / "files") ? staging / "files" : staging / "rootfs";
+                        const char* configured_root = std::getenv("LUNAR_INSTALL_ROOT");
+                        fs::path install_root = configured_root ? configured_root : "/";
+                        if (!configured_root && fs::status(install_root).permissions() != fs::perms::unknown &&
+                            (fs::status(install_root).permissions() & fs::perms::owner_write) == fs::perms::none) {
+                            install_root = data_dir_ + "/rootfs";
+                        }
+                        if (!extracted || !fs::exists(payload) || !copy_payload(payload, install_root, created)) {
+                            rollback_files(created);
+                            for (const auto& prior : installed_artifacts) rollback_files(prior);
+                            fs::remove_all(staging);
+                            txn.advance_state(TransactionState::Failed, "Artifact installation failed or file conflict detected");
+                            txn.advance_state(TransactionState::RolledBack);
+                            return false;
+                        }
+                        fs::remove_all(staging);
+                        installed_artifacts.push_back(std::move(created));
                     }
                 }
                 system_store_->install(op.target());

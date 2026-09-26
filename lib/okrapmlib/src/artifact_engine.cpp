@@ -262,10 +262,10 @@ bool ArtifactExtractor::extract(const std::string& archive_path,
     std::error_code ec;
     fs::create_directories(target_dir, ec);
     std::string v_flag = verbose ? "v" : "";
-    std::string cmd = "tar --zstd -x" + v_flag + "f \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null || "
-                      "tar -xz -x" + v_flag + "f \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null || "
-                      "tar -xJ -x" + v_flag + "f \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null || "
-                      "tar -x" + v_flag + "f \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null";
+    std::string cmd = "tar -x" + v_flag + "f \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null || "
+                      "tar --zstd -x" + v_flag + "f \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null || "
+                      "tar -xzf \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null || "
+                      "tar -xJf \"" + archive_path + "\" -C \"" + target_dir + "\" 2>/dev/null";
     return std::system(cmd.c_str()) == 0;
 }
 
