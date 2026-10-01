@@ -1,5 +1,6 @@
 #include "okrapmlib/lunar_core.h"
 #include "okrapmlib/artifact_engine.h"
+#include "opsis/interpreter.h"
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -248,7 +249,11 @@ LunarCore::InstallResult LunarCore::sync(const std::vector<std::string>& targets
     for (const auto& target : targets) {
         auto repo = repo_mgr_->get(target);
         if (repo) {
-            repo->sync();
+            if (!repo->sync()) {
+                res.success = false;
+                res.error_message = "Failed to sync repository " + target;
+                return res;
+            }
         } else {
             // 同步指定系统对象或命名空间
             auto obj_opt = repo_mgr_->find(target);
@@ -471,6 +476,7 @@ bool LunarCore::rollback(uint64_t snapshot_id) {
 
 bool LunarCore::commit_transaction(Transaction& txn) {
     std::vector<std::vector<fs::path>> installed_artifacts;
+    std::vector<Operation> pending_store;
     txn.advance_state(TransactionState::Verified);
     extensions().trigger_hooks(HookType::PreTransaction, txn);
 
@@ -478,6 +484,39 @@ bool LunarCore::commit_transaction(Transaction& txn) {
 
     // 事务前自动生成快照保护系统
     snapshot_mgr_->create(*system_store_, "Auto snapshot before txn " + std::to_string(txn.id()));
+
+    auto fail_transaction = [&](const std::string& message) {
+        for (const auto& prior : installed_artifacts) rollback_files(prior);
+        txn.advance_state(TransactionState::Failed, message);
+        txn.advance_state(TransactionState::RolledBack);
+        return false;
+    };
+
+    auto install_root_for = [&]() {
+        const char* configured_root = std::getenv("LUNAR_INSTALL_ROOT");
+        fs::path install_root = configured_root ? configured_root : "/";
+        if (!configured_root && fs::status(install_root).permissions() != fs::perms::unknown &&
+            (fs::status(install_root).permissions() & fs::perms::owner_write) == fs::perms::none) {
+            install_root = data_dir_ + "/rootfs";
+        }
+        return install_root;
+    };
+
+    // 先复制 payload，再执行包内 scripts/install.opsis。脚本失败则整次提交回滚。
+    auto apply_package = [&](const fs::path& staging, std::vector<fs::path>& created) -> const char* {
+        fs::path payload = fs::exists(staging / "files") ? staging / "files" : staging / "rootfs";
+        bool has_payload = fs::is_directory(payload);
+        bool has_opsis = fs::is_regular_file(staging / "scripts/install.opsis")
+            || fs::is_regular_file(staging / "install.opsis");
+        if (!has_payload && !has_opsis) return "package has no payload or install.opsis";
+        if (has_payload && !copy_payload(payload, install_root_for(), created)) {
+            return "Artifact installation failed or file conflict detected";
+        }
+        if (Opsis::RunPackageScript(staging.string(), install_root_for().string(), false) != 0) {
+            return "OPSIS install script failed";
+        }
+        return nullptr;
+    };
 
     for (const auto& op : txn.operations()) {
         switch (op.type()) {
@@ -489,27 +528,16 @@ bool LunarCore::commit_transaction(Transaction& txn) {
                 if (op.target().repository().rfind("local:", 0) == 0) {
                     std::string local_path = op.target().repository().substr(6);
                     if (!fs::exists(local_path) || !verify_sidecar(local_path)) {
-                        txn.advance_state(TransactionState::Failed, "Local artifact SHA256 verification failed");
-                        txn.advance_state(TransactionState::RolledBack);
-                        return false;
+                        return fail_transaction("Local artifact SHA256 verification failed");
                     }
                     auto staging = fs::temp_directory_path() / ("lunar-install-" + std::to_string(txn.id()));
                     std::vector<fs::path> created;
                     bool extracted = ArtifactExtractor::extract(local_path, staging.string());
-                    fs::path payload = fs::exists(staging / "files") ? staging / "files" : staging / "rootfs";
-                    const char* configured_root = std::getenv("LUNAR_INSTALL_ROOT");
-                    fs::path install_root = configured_root ? configured_root : "/";
-                    if (!configured_root && fs::status(install_root).permissions() != fs::perms::unknown &&
-                        (fs::status(install_root).permissions() & fs::perms::owner_write) == fs::perms::none) {
-                        install_root = data_dir_ + "/rootfs";
-                    }
-                    if (!extracted || !fs::exists(payload) || !copy_payload(payload, install_root, created)) {
+                    const char* package_error = extracted ? apply_package(staging, created) : "Local artifact installation failed";
+                    if (package_error) {
                         rollback_files(created);
-                        for (const auto& prior : installed_artifacts) rollback_files(prior);
                         fs::remove_all(staging);
-                        txn.advance_state(TransactionState::Failed, "Local artifact installation failed or file conflict detected");
-                        txn.advance_state(TransactionState::RolledBack);
-                        return false;
+                        return fail_transaction(package_error);
                     }
                     fs::remove_all(staging);
                     installed_artifacts.push_back(std::move(created));
@@ -517,39 +545,44 @@ bool LunarCore::commit_transaction(Transaction& txn) {
                     // 本地 artifact 的归档路径由 install() 传入并保留在目标对象中
                 } else {
                     auto repo = repo_mgr_->get_repository_for_object(op.target());
-                    if (repo) {
+                    // 远程仓库必须下载归档再复制。本地仓库里的对象可以只有元数据。
+                    if (repo && repo->type_name() == "remote") {
                         auto art_path = repo->fetch_artifact(op.target());
                         if (!art_path || !fs::exists(*art_path)) {
-                            txn.advance_state(TransactionState::Failed, "Failed to fetch artifact for " + op.target().full_name());
-                            txn.advance_state(TransactionState::RolledBack);
-                            return false;
+                            return fail_transaction("Failed to fetch artifact for " + op.target().full_name());
                         }
                         auto staging = fs::temp_directory_path() / ("lunar-install-" + std::to_string(txn.id()) + "-" + op.target().name());
                         std::vector<fs::path> created;
                         bool extracted = ArtifactExtractor::extract(*art_path, staging.string());
-                        fs::path payload = fs::exists(staging / "files") ? staging / "files" : staging / "rootfs";
-                        const char* configured_root = std::getenv("LUNAR_INSTALL_ROOT");
-                        fs::path install_root = configured_root ? configured_root : "/";
-                        if (!configured_root && fs::status(install_root).permissions() != fs::perms::unknown &&
-                            (fs::status(install_root).permissions() & fs::perms::owner_write) == fs::perms::none) {
-                            install_root = data_dir_ + "/rootfs";
-                        }
-                        if (!extracted || !fs::exists(payload) || !copy_payload(payload, install_root, created)) {
+                        const char* package_error = extracted ? apply_package(staging, created) : "Artifact installation failed";
+                        if (package_error) {
                             rollback_files(created);
-                            for (const auto& prior : installed_artifacts) rollback_files(prior);
                             fs::remove_all(staging);
-                            txn.advance_state(TransactionState::Failed, "Artifact installation failed or file conflict detected");
-                            txn.advance_state(TransactionState::RolledBack);
-                            return false;
+                            return fail_transaction(package_error);
                         }
                         fs::remove_all(staging);
                         installed_artifacts.push_back(std::move(created));
                     }
                 }
+                pending_store.push_back(op);
+                break;
+            }
+            case OperationType::Remove:
+            case OperationType::Purge:
+                pending_store.push_back(op);
+                break;
+        }
+    }
+
+    for (const auto& op : pending_store) {
+        switch (op.type()) {
+            case OperationType::Install:
+            case OperationType::Update:
+            case OperationType::Upgrade:
+            case OperationType::Sync:
                 system_store_->install(op.target());
                 extensions().trigger_hooks(HookType::PostInstall, txn);
                 break;
-            }
             case OperationType::Remove:
             case OperationType::Purge:
                 extensions().trigger_hooks(HookType::PreRemove, txn);
@@ -560,9 +593,8 @@ bool LunarCore::commit_transaction(Transaction& txn) {
     }
 
     if (!system_store_->save()) {
-        txn.advance_state(TransactionState::Failed, "Failed to persist system store");
-        txn.advance_state(TransactionState::RolledBack);
-        return false;
+        system_store_->load();
+        return fail_transaction("Failed to persist system store");
     }
 
     system_store_->advance_state_id();

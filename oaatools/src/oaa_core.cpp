@@ -133,6 +133,18 @@ bool OaaCore::init_skeleton(const std::string& dir, const OaaMeta& initial_meta)
         post_build.close();
         fs::permissions(dir + "/scripts/post-build", fs::perms::owner_all | fs::perms::group_exec | fs::perms::others_exec);
 
+        std::ofstream install_opsis(dir + "/scripts/install.opsis");
+        install_opsis << "public class Package {\n"
+                      << "    public void Install() {\n"
+                      << "        CheckUser();\n"
+                      << "        InstallDirectory(\"rootfs\", \"/\");\n"
+                      << "        UpdateLdconfig();\n"
+                      << "        RecordInstalled(\"" << initial_meta.name << "\", \""
+                      << initial_meta.version << "\", \"meta.yaml\");\n"
+                      << "    }\n"
+                      << "}\n";
+        install_opsis.close();
+
         return true;
     } catch (...) {
         return false;

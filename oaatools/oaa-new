@@ -82,6 +82,17 @@ echo "[post-install] install complete"
 EOF
 chmod +x "$pkg_dir/scripts/post-install"
 
+cat > "$pkg_dir/scripts/install.opsis" <<EOF
+public class Package {
+    public void Install() {
+        CheckUser();
+        InstallDirectory("rootfs", "/");
+        UpdateLdconfig();
+        RecordInstalled("$name", "$version", "meta.yaml");
+    }
+}
+EOF
+
 cat > "$pkg_dir/rootfs/usr/bin/$name" <<EOF
 #!/bin/sh
 echo "$name $version - installed via OkraPM OAA"

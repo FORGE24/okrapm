@@ -23,6 +23,7 @@ target_include_directories(okrapmlib
 target_link_libraries(okrapmlib
     PUBLIC
         ${CMAKE_DL_LIBS}
+        opsislib
 )
 
 target_compile_features(okrapmlib PUBLIC cxx_std_17)

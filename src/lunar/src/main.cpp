@@ -5,74 +5,26 @@
 #include <iomanip>
 #include <cstdlib>
 #include <fstream>
+#include <ctime>
 #include "okrapmlib/lunar_core.h"
 #include "okrapmlib/artifact_engine.h"
 #include "okrapmlib/pipeline_engine.h"
+#include "cli_text.h"
 
 using namespace okrapm;
 
-void print_banner() {
-    std::cout << "\033[1;32m"
-              << "   ____   __ __  ___     ____   ____   __  ___\n"
-              << "  / __ \\ / //_/ /   |   / __ \\ / __ \\ /  |/  /\n"
-              << " / / / // ,<   / /| |  / /_/ // /_/ // /|_/ / \n"
-              << "/ /_/ // /| | / ___ | / _, _// ____// /  / /  \n"
-              << "\\____//_/ |_|/_/  |_|/_/ |_|/_/    /_/  /_/   \n"
-              << "\033[0m\n"
-              << "Lunar Package & System State Manager v1.0.0 (Okra Rolling Linux)\n\n";
+static std::string JoinWords(const std::vector<std::string> &Words)
+{
+	std::string Text;
+	for (size_t Index = 0; Index < Words.size(); ++Index) {
+		if (Index) Text += " ";
+		Text += Words[Index];
+	}
+	return Text;
 }
 
 void print_help() {
-    print_banner();
-    std::cout << "Usage: lunar [options] <command> [arguments...]\n\n"
-              << "Options:\n"
-              << "  -r, --root <dir>          Specify custom state and data root directory\n\n"
-              << "Commands:\n"
-              << "  install <ref...>          Install package(s), group(s) (#group), artifact(s) (.oaa)\n"
-              << "  install-group <name>      Install a group of objects\n"
-              << "  download <ref...>         Download package artifact(s) without installing\n"
-              << "  remove <ref...>           Remove package(s) or object(s)\n"
-              << "  purge <ref...>            Remove package(s) and purge configuration\n"
-              << "  update [ref...]           Rolling update for system or objects\n"
-              << "  upgradle <target...>      System-level baseline upgrade\n"
-              << "  sync [target...]          Sync repositories or system objects\n"
-              << "  plan <command> <ref...>   Preview transaction plan without applying\n"
-              << "\n"
-              << "Pipeline & Stream Processing:\n"
-              << "  pipe '<expr>'             Execute object stream pipeline (e.g. 'find \"gnu.*\" | where outdated | update')\n"
-              << "\n"
-              << "Artifact & Packaging (.oaa / .okra):\n"
-              << "  build <dir> [out_file]    Build an artifact package from directory\n"
-              << "  artifact inspect <file>   Inspect metadata and files in artifact\n"
-              << "  artifact verify <file>   Verify package checksum and archive integrity\n"
-              << "  artifact extract <f> <d>  Extract artifact archive to destination directory\n"
-              << "\n"
-              << "Query & Inspection:\n"
-              << "  search <query>            Search objects by keyword\n"
-              << "  find <pattern>            Find objects by glob pattern (e.g. \"gnu.*\")\n"
-              << "  list                      List all installed objects\n"
-              << "  status                    Display current system state summary\n"
-              << "  info <ref>                Show detailed object information\n"
-              << "  members <#group>          Expand group and list its member packages\n"
-              << "\n"
-              << "System State & Transactions:\n"
-              << "  transaction list          List recent transaction history\n"
-              << "  transaction show <id>     Show transaction details\n"
-              << "  snapshot list             List system snapshots\n"
-              << "  snapshot create [desc]    Create a new system snapshot\n"
-              << "  rollback [snapshot_id]    Rollback system state to a previous snapshot\n"
-              << "\n"
-              << "Repository Management:\n"
-              << "  repo list                 List configured repositories\n"
-              << "  repo add <name> <url> [t] Add a repository (local or remote)\n"
-              << "  repo remove <name>        Remove a repository\n"
-              << "  repo enable <name>        Enable a repository\n"
-              << "  repo disable <name>       Disable a repository\n"
-              << "\n"
-              << "Extensions & Plugins:\n"
-              << "  ext list                  List installed extensions and plugins\n"
-              << "  ext load <path.so>        Dynamically load a shared library plugin\n"
-              << "  ext run <name> [args...]  Execute an extension operation\n\n";
+    Cli::Help();
 }
 
 static std::vector<std::string> expand_stdin_targets(const std::vector<std::string>& targets) {
@@ -133,7 +85,7 @@ int main(int argc, char* argv[]) {
     // ---- Pipeline Stream Processing (pipe) ----
     if (command == "pipe") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: 'lunar pipe' requires a pipeline expression (e.g. 'find \"gnu.*\" | where outdated | update')\n";
+            Cli::Error("usage: lunar pipe '<expr>'");
             return 1;
         }
         std::ostringstream oss;
@@ -144,7 +96,7 @@ int main(int argc, char* argv[]) {
         std::string pipe_expr = oss.str();
         auto pipe_res = PipelineEngine::execute(pipe_expr, core);
         if (!pipe_res.success && !pipe_res.error_message.empty()) {
-            std::cerr << "Pipeline Error: " << pipe_res.error_message << "\n";
+            Cli::TaskFail(pipe_res.error_message);
             return 1;
         }
         std::cout << pipe_res.output;
@@ -154,7 +106,7 @@ int main(int argc, char* argv[]) {
     // ---- Artifact Packaging (build) ----
     if (command == "build") {
         if (raw_args.size() < 2) {
-            std::cerr << "Usage: lunar build <source_dir> [output_file.oaa]\n";
+            Cli::Error("usage: lunar build <source_dir> [output_file.oaa]");
             return 1;
         }
         std::string src_dir = raw_args[1];
@@ -162,13 +114,13 @@ int main(int argc, char* argv[]) {
         if (raw_args.size() >= 3) {
             opts.output_path = raw_args[2];
         }
-        std::cout << ":: Building artifact from '" << src_dir << "'...\n";
+        Cli::TaskBegin("build", src_dir);
         auto built = ArtifactBuilder::build(src_dir, opts);
         if (built) {
-            std::cout << ":: Artifact built successfully: " << *built << "\n";
+            Cli::TaskOk(*built);
             return 0;
         } else {
-            std::cerr << "Error: Failed to build artifact from " << src_dir << "\n";
+            Cli::TaskFail("failed to build artifact");
             return 1;
         }
     }
@@ -176,13 +128,13 @@ int main(int argc, char* argv[]) {
     // ---- Artifact Verification (verify) ----
     if (command == "verify") {
         if (raw_args.size() < 2) {
-            std::cerr << "Usage: lunar verify <file.oaa>\n";
+            Cli::Error("usage: lunar verify <file.oaa>");
             return 1;
         }
         const std::string& file = raw_args[1];
         auto meta = ArtifactExtractor::inspect(file);
         if (!meta) {
-            std::cerr << "Error: Failed to verify artifact " << file << "\n";
+            Cli::TaskFail("cannot read " + file);
             return 1;
         }
         std::ifstream sidecar(file + ".sha256");
@@ -190,19 +142,19 @@ int main(int argc, char* argv[]) {
             std::string expected;
             sidecar >> expected;
             if (expected.empty() || expected != ArtifactExtractor::calculate_sha256(file)) {
-                std::cerr << "Error: SHA256 verification failed: " << file << "\n";
+                Cli::TaskFail("sha256 mismatch");
                 return 1;
             }
         }
-        std::cout << ":: " << file << " is VALID (SHA256 "
-                  << ArtifactExtractor::calculate_sha256(file) << ").\n";
+        Cli::TaskBegin("verify", file);
+        Cli::TaskOk(ArtifactExtractor::calculate_sha256(file));
         return 0;
     }
 
     // ---- Artifact Sub-commands (artifact) ----
     if (command == "artifact") {
         if (raw_args.size() < 2) {
-            std::cerr << "Usage: lunar artifact <inspect <file> | extract <file> <dest>>\n";
+            Cli::Error("usage: lunar artifact <inspect|verify|extract> ...");
             return 1;
         }
         std::string sub = raw_args[1];
@@ -210,7 +162,7 @@ int main(int argc, char* argv[]) {
             std::string file = raw_args[2];
             auto meta = ArtifactExtractor::inspect(file);
             if (!meta) {
-                std::cerr << "Error: Artifact verification failed: " << file << "\n";
+                Cli::TaskFail("cannot read " + file);
                 return 1;
             }
             std::ifstream sidecar(file + ".sha256");
@@ -218,47 +170,52 @@ int main(int argc, char* argv[]) {
                 std::string expected;
                 sidecar >> expected;
                 if (expected.empty() || expected != ArtifactExtractor::calculate_sha256(file)) {
-                    std::cerr << "Error: Artifact SHA256 verification failed: " << file << "\n";
+                    Cli::TaskFail("sha256 mismatch");
                     return 1;
                 }
             }
             if (!meta->checksum.empty() && meta->checksum != ArtifactExtractor::calculate_sha256(file)) {
-                std::cerr << "Error: Embedded artifact SHA256 verification failed: " << file << "\n";
+                Cli::TaskFail("embedded sha256 mismatch");
                 return 1;
             }
-            std::cout << ":: " << file << " is VALID (SHA256 " << ArtifactExtractor::calculate_sha256(file) << ").\n";
+            Cli::TaskBegin("verify", file);
+            Cli::TaskOk(ArtifactExtractor::calculate_sha256(file));
             return 0;
         } else if (sub == "inspect" && raw_args.size() >= 3) {
             std::string file = raw_args[2];
             auto meta = ArtifactExtractor::inspect(file);
             if (!meta) {
-                std::cerr << "Error: Failed to inspect artifact " << file << "\n";
+                Cli::TaskFail("cannot read " + file);
                 return 1;
             }
-            std::cout << "Artifact:      " << file << "\n"
-                      << "Namespace:     " << meta->ns << "\n"
-                      << "Name:          " << meta->name << "\n"
-                      << "Version:       " << meta->version.to_string() << "\n"
-                      << "Architecture:  " << meta->architecture << "\n"
-                      << "Description:   " << meta->description << "\n"
-                      << "Maintainer:    " << meta->maintainer << "\n"
-                      << "SHA256:        " << meta->checksum << "\n"
-                      << "Size:          " << (meta->download_size / 1024) << " KB\n";
-            if (!meta->dependencies.empty()) {
-                std::cout << "Dependencies:  ";
-                for (const auto& dep : meta->dependencies) std::cout << dep << " ";
-                std::cout << "\n";
+            std::string deps;
+            for (size_t i = 0; i < meta->dependencies.size(); ++i) {
+                if (i) deps += " ";
+                deps += meta->dependencies[i];
             }
+            std::vector<std::pair<std::string, std::string>> fields = {
+                {"path", file},
+                {"namespace", meta->ns},
+                {"name", meta->name},
+                {"version", meta->version.to_string()},
+                {"architecture", meta->architecture},
+                {"description", meta->description},
+                {"maintainer", meta->maintainer},
+                {"sha256", meta->checksum},
+                {"size", std::to_string(meta->download_size / 1024) + " KB"}
+            };
+            if (!deps.empty()) fields.push_back({"dependencies", deps});
+            Cli::PrintFields(fields);
             return 0;
         } else if (sub == "extract" && raw_args.size() >= 4) {
             std::string file = raw_args[2];
             std::string dest = raw_args[3];
-            std::cout << ":: Extracting '" << file << "' to '" << dest << "'...\n";
-            if (ArtifactExtractor::extract(file, dest, /*verbose=*/true)) {
-                std::cout << ":: Extraction complete.\n";
+            Cli::TaskBegin("extract", file);
+            if (ArtifactExtractor::extract(file, dest, /*verbose=*/false)) {
+                Cli::TaskOk(dest);
                 return 0;
             } else {
-                std::cerr << "Error: Extraction failed.\n";
+                Cli::TaskFail("extraction failed");
                 return 1;
             }
         }
@@ -267,7 +224,7 @@ int main(int argc, char* argv[]) {
     // ---- Plan 预览模式 ----
     if (command == "plan") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: 'lunar plan' requires a sub-command (e.g., install, remove, update)\n";
+            Cli::Error("usage: lunar plan <install|remove|update|upgradle> <ref...>");
             return 1;
         }
         std::string sub_cmd = raw_args[1];
@@ -276,38 +233,46 @@ int main(int argc, char* argv[]) {
 
         if (sub_cmd == "install") {
             auto res = core.install(args, /*plan_only=*/true);
+            Cli::TaskBegin("plan install", JoinWords(args));
             if (!res.success && res.transaction.operations().empty()) {
-                std::cerr << "Plan error: " << res.error_message << "\n";
+                Cli::TaskFail(res.error_message);
                 return 1;
             }
-            std::cout << res.transaction.to_string() << "\n";
+            Cli::PrintOperations(res.transaction);
+            Cli::TaskOk(res.transaction.operations().empty() ? "nothing to do" : "not applied");
             return 0;
         } else if (sub_cmd == "remove") {
             auto res = core.remove(args, /*purge=*/false, /*plan_only=*/true);
+            Cli::TaskBegin("plan remove", JoinWords(args));
             if (!res.success && res.transaction.operations().empty()) {
-                std::cerr << "Plan error: " << res.error_message << "\n";
+                Cli::TaskFail(res.error_message);
                 return 1;
             }
-            std::cout << res.transaction.to_string() << "\n";
+            Cli::PrintOperations(res.transaction);
+            Cli::TaskOk(res.transaction.operations().empty() ? "nothing to do" : "not applied");
             return 0;
         } else if (sub_cmd == "update") {
             auto res = core.update(args, /*plan_only=*/true);
+            Cli::TaskBegin("plan update", JoinWords(args));
             if (!res.success && res.transaction.operations().empty()) {
-                std::cerr << "Plan error: " << res.error_message << "\n";
+                Cli::TaskFail(res.error_message);
                 return 1;
             }
-            std::cout << res.transaction.to_string() << "\n";
+            Cli::PrintOperations(res.transaction);
+            Cli::TaskOk(res.transaction.operations().empty() ? "nothing to do" : "not applied");
             return 0;
         } else if (sub_cmd == "upgradle") {
             auto res = core.upgradle(args, /*plan_only=*/true);
+            Cli::TaskBegin("plan upgradle", JoinWords(args));
             if (!res.success && res.transaction.operations().empty()) {
-                std::cerr << "Plan error: " << res.error_message << "\n";
+                Cli::TaskFail(res.error_message);
                 return 1;
             }
-            std::cout << res.transaction.to_string() << "\n";
+            Cli::PrintOperations(res.transaction);
+            Cli::TaskOk(res.transaction.operations().empty() ? "nothing to do" : "not applied");
             return 0;
         } else {
-            std::cerr << "Unknown sub-command for plan: " << sub_cmd << "\n";
+            Cli::Error("unknown plan command: " + sub_cmd);
             return 1;
         }
     }
@@ -315,87 +280,88 @@ int main(int argc, char* argv[]) {
     // ---- Install ----
     if (command == "install") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: No packages or objects specified to install.\n";
+            Cli::Error("usage: lunar install <ref...>");
             return 1;
         }
         std::vector<std::string> targets(raw_args.begin() + 1, raw_args.end());
         targets = expand_stdin_targets(targets);
 
-        std::cout << ":: Resolving dependencies for " << targets.size() << " target(s)...\n";
+        Cli::TaskBegin("install", JoinWords(targets));
         auto res = core.install(targets);
         if (res.success) {
-            std::cout << res.transaction.to_string() << "\n";
-            std::cout << ":: Transaction committed successfully.\n";
+            Cli::PrintOperations(res.transaction);
+            size_t count = res.transaction.operations().size();
+            Cli::TaskOk(std::to_string(count) + (count == 1 ? " package" : " packages"));
             return 0;
-        } else {
-            std::cerr << "Error: " << res.error_message << "\n";
-            return 1;
         }
+        Cli::TaskFail(res.error_message);
+        return 1;
     }
 
     // ---- Install Group ----
     if (command == "install-group") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: Group name required.\n";
+            Cli::Error("usage: lunar install-group <name>");
             return 1;
         }
         std::string group_ref = raw_args[1];
         if (group_ref.empty() || group_ref[0] != '#') {
             group_ref = "#" + group_ref;
         }
+        Cli::TaskBegin("install", group_ref);
         auto res = core.install({group_ref});
         if (res.success) {
-            std::cout << res.transaction.to_string() << "\n";
-            std::cout << ":: Group transaction committed successfully.\n";
+            Cli::PrintOperations(res.transaction);
+            size_t count = res.transaction.operations().size();
+            Cli::TaskOk(std::to_string(count) + (count == 1 ? " package" : " packages"));
             return 0;
-        } else {
-            std::cerr << "Error: " << res.error_message << "\n";
-            return 1;
         }
+        Cli::TaskFail(res.error_message);
+        return 1;
     }
 
     // ---- Download (Fetch only) ----
     if (command == "download") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: No packages or objects specified to download.\n";
+            Cli::Error("usage: lunar download <ref...>");
             return 1;
         }
         std::vector<std::string> targets(raw_args.begin() + 1, raw_args.end());
         targets = expand_stdin_targets(targets);
 
-        std::cout << ":: Downloading artifact(s) for " << targets.size() << " target(s)...\n";
+        Cli::TaskBegin("download", JoinWords(targets));
         auto res = core.download(targets);
         if (res.success) {
-            std::cout << ":: Download completed successfully:\n";
-            for (const auto& p : res.downloaded_paths) {
-                std::cout << "  - " << p << "\n";
-            }
+            std::vector<std::vector<std::string>> rows;
+            for (const auto& path : res.downloaded_paths) rows.push_back({path});
+            Cli::PrintTable({"PATH"}, rows, 2);
+            Cli::TaskOk(std::to_string(res.downloaded_paths.size()) + " files");
             return 0;
-        } else {
-            std::cerr << "Download Error: " << res.error_message << "\n";
-            return 1;
         }
+        Cli::TaskFail(res.error_message);
+        return 1;
     }
 
     // ---- Remove / Purge ----
     if (command == "remove" || command == "purge") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: No objects specified to remove.\n";
+            Cli::Error("usage: lunar " + command + " <ref...>");
             return 1;
         }
         bool is_purge = (command == "purge");
         std::vector<std::string> targets(raw_args.begin() + 1, raw_args.end());
         targets = expand_stdin_targets(targets);
 
+        Cli::TaskBegin(command, JoinWords(targets));
         auto res = core.remove(targets, is_purge);
         if (res.success) {
-            std::cout << res.transaction.to_string() << "\n";
-            std::cout << ":: Remove transaction committed successfully.\n";
+            Cli::PrintOperations(res.transaction);
+            size_t count = res.transaction.operations().size();
+            Cli::TaskOk(std::to_string(count) + (count == 1 ? " package" : " packages"));
             return 0;
-        } else {
-            std::cerr << "Error: " << res.error_message << "\n";
-            return 1;
         }
+        Cli::TaskFail(res.error_message);
+        return 1;
     }
 
     // ---- Update (Rolling update) ----
@@ -403,186 +369,197 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> targets(raw_args.begin() + 1, raw_args.end());
         targets = expand_stdin_targets(targets);
 
-        std::cout << ":: Checking rolling updates...\n";
+        Cli::TaskBegin("update", JoinWords(targets));
         auto res = core.update(targets);
-        if (res.success) {
-            if (res.transaction.operations().empty()) {
-                std::cout << ":: System is already up to date. S(t) is current.\n";
-            } else {
-                std::cout << res.transaction.to_string() << "\n";
-                std::cout << ":: System state updated successfully.\n";
-            }
-            return 0;
-        } else {
-            std::cerr << "Error: " << res.error_message << "\n";
+        if (!res.success) {
+            Cli::TaskFail(res.error_message);
             return 1;
         }
+        if (res.transaction.operations().empty()) {
+            Cli::TaskOk("already current");
+            return 0;
+        }
+        Cli::PrintOperations(res.transaction);
+        size_t count = res.transaction.operations().size();
+        Cli::TaskOk(std::to_string(count) + (count == 1 ? " package" : " packages"));
+        return 0;
     }
 
     // ---- Upgradle (System-level baseline upgrade) ----
     if (command == "upgradle") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: Target system object required for upgradle (e.g. okra.systemversion).\n";
+            Cli::Error("usage: lunar upgradle <target...>");
             return 1;
         }
         std::vector<std::string> targets(raw_args.begin() + 1, raw_args.end());
 
-        std::cout << ":: Initiating system baseline upgrade (upgradle)...\n";
+        Cli::TaskBegin("upgradle", JoinWords(targets));
         auto res = core.upgradle(targets);
         if (res.success) {
-            std::cout << res.transaction.to_string() << "\n";
-            std::cout << ":: System baseline successfully shifted.\n";
+            Cli::PrintOperations(res.transaction);
+            Cli::TaskOk("baseline shifted");
             return 0;
-        } else {
-            std::cerr << "Error: " << res.error_message << "\n";
-            return 1;
         }
+        Cli::TaskFail(res.error_message);
+        return 1;
     }
 
     // ---- Sync ----
     if (command == "sync") {
         std::vector<std::string> targets(raw_args.begin() + 1, raw_args.end());
 
-        std::cout << ":: Synchronizing world state...\n";
+        Cli::TaskBegin("sync", JoinWords(targets));
         auto res = core.sync(targets);
         if (res.success) {
-            std::cout << ":: Synchronization complete.\n";
+            Cli::TaskOk(targets.empty() ? "all repositories" : JoinWords(targets));
             return 0;
-        } else {
-            std::cerr << "Sync failed: " << res.error_message << "\n";
-            return 1;
         }
+        Cli::TaskFail(res.error_message.empty() ? "sync failed" : res.error_message);
+        return 1;
     }
 
     // ---- Find (Pattern query) ----
     if (command == "find") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: Pattern required (e.g. \"gnu.*\" or \"kde.*\")\n";
+            Cli::Error("usage: lunar find <pattern>");
             return 1;
         }
         std::string pattern = raw_args[1];
         auto col = core.find(pattern);
-        std::cout << "Collection<Object> (" << col.count() << " items matching \"" << pattern << "\"):\n";
+        std::vector<std::vector<std::string>> rows;
         for (const auto& obj : col.to_vector()) {
-            std::cout << "  " << std::left << std::setw(28) << obj.ref_string()
-                      << " " << obj.description() << "\n";
+            rows.push_back({obj.ref_string(), obj.version().to_string(), obj.description()});
         }
+        Cli::PrintTable({"OBJECT", "VERSION", "DESCRIPTION"}, rows);
         return 0;
     }
 
     // ---- Search ----
     if (command == "search") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: Keyword required.\n";
+            Cli::Error("usage: lunar search <query>");
             return 1;
         }
         std::string query = raw_args[1];
         auto col = core.search(query);
-        std::cout << "Collection<Object> (" << col.count() << " results for \"" << query << "\"):\n";
+        std::vector<std::vector<std::string>> rows;
         for (const auto& obj : col.to_vector()) {
-            std::cout << "  " << std::left << std::setw(28) << obj.ref_string()
-                      << " " << obj.description() << "\n";
+            rows.push_back({obj.ref_string(), obj.version().to_string(), obj.description()});
         }
+        Cli::PrintTable({"OBJECT", "VERSION", "DESCRIPTION"}, rows);
         return 0;
     }
 
     // ---- List Installed ----
     if (command == "list") {
         auto col = core.list_installed();
-        std::cout << "Installed Objects (" << col.count() << " total):\n";
+        std::vector<std::vector<std::string>> rows;
         for (const auto& obj : col.to_vector()) {
-            std::cout << "  " << std::left << std::setw(28) << obj.ref_string()
-                      << " [v" << obj.version().to_string() << "] ("
-                      << obj.repository() << ")\n";
+            rows.push_back({obj.ns(), obj.name(), obj.version().to_string(), obj.repository()});
         }
+        Cli::PrintTable({"NAMESPACE", "NAME", "VERSION", "REPOSITORY"}, rows);
         return 0;
     }
 
     // ---- Info ----
     if (command == "info") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: Object ref required.\n";
+            Cli::Error("usage: lunar info <ref>");
             return 1;
         }
         auto obj = core.info(raw_args[1]);
         if (!obj) {
-            std::cerr << "Object not found: " << raw_args[1] << "\n";
+            Cli::Error("object not found: " + raw_args[1]);
             return 1;
         }
-        std::cout << "Object:       " << obj->ref_string() << "\n"
-                  << "Namespace:    " << obj->ns() << "\n"
-                  << "Name:         " << obj->name() << "\n"
-                  << "Version:      " << obj->version().to_string() << "\n"
-                  << "Type:         " << Object::type_name(obj->type()) << "\n"
-                  << "Repository:   " << obj->repository() << "\n"
-                  << "Description:  " << obj->description() << "\n"
-                  << "Download Size:" << (obj->download_size() / 1024) << " KB\n"
-                  << "Install Size: " << (obj->installed_size() / 1024) << " KB\n";
-        if (!obj->dependencies().empty()) {
-            std::cout << "Dependencies: ";
-            for (const auto& dep : obj->dependencies()) std::cout << dep << " ";
-            std::cout << "\n";
+        std::string deps;
+        for (size_t i = 0; i < obj->dependencies().size(); ++i) {
+            if (i) deps += " ";
+            deps += obj->dependencies()[i];
         }
+        std::vector<std::pair<std::string, std::string>> fields = {
+            {"object", obj->ref_string()},
+            {"namespace", obj->ns()},
+            {"name", obj->name()},
+            {"version", obj->version().to_string()},
+            {"type", Object::type_name(obj->type())},
+            {"repository", obj->repository()},
+            {"description", obj->description()},
+            {"download", std::to_string(obj->download_size() / 1024) + " KB"},
+            {"install", std::to_string(obj->installed_size() / 1024) + " KB"}
+        };
+        if (!deps.empty()) fields.push_back({"dependencies", deps});
+        Cli::PrintFields(fields);
         return 0;
     }
 
     // ---- Members (Group expand) ----
     if (command == "members") {
         if (raw_args.size() < 2) {
-            std::cerr << "Error: Group ref required (e.g. #kde.kde-desktop)\n";
+            Cli::Error("usage: lunar members <#group>");
             return 1;
         }
         std::string group_ref = raw_args[1];
         if (!group_ref.empty() && group_ref[0] == '#') group_ref = group_ref.substr(1);
         auto obj = core.info(group_ref);
         if (!obj) {
-            std::cerr << "Group not found: " << raw_args[1] << "\n";
+            Cli::Error("group not found: " + raw_args[1]);
             return 1;
         }
-        std::cout << "Group " << raw_args[1] << " members (" << obj->dependencies().size() << " objects):\n";
-        for (const auto& mem : obj->dependencies()) {
-            std::cout << "  - " << mem << "\n";
-        }
+        std::vector<std::vector<std::string>> rows;
+        for (const auto& mem : obj->dependencies()) rows.push_back({mem});
+        Cli::PrintTable({"MEMBER"}, rows);
         return 0;
     }
 
     // ---- Status ----
     if (command == "status") {
         auto st = core.status();
-        std::cout << "=== Lunar System State Summary ===\n"
-                  << "State ID:         #" << st.state_id << "\n"
-                  << "System Baseline:  " << st.system_version << "\n"
-                  << "Installed Objects:" << st.installed_count << "\n"
-                  << "Outdated Objects: " << st.outdated_count << "\n"
-                  << "Active Repos:     ";
-        for (const auto& r : st.repositories) std::cout << r << " ";
-        std::cout << "\n";
+        std::string repos;
+        for (size_t i = 0; i < st.repositories.size(); ++i) {
+            if (i) repos += " ";
+            repos += st.repositories[i];
+        }
+        Cli::PrintFields({
+            {"state", "#" + std::to_string(st.state_id)},
+            {"baseline", st.system_version},
+            {"installed", std::to_string(st.installed_count)},
+            {"outdated", std::to_string(st.outdated_count)},
+            {"repositories", repos}
+        });
         return 0;
     }
 
     // ---- Transaction ----
     if (command == "transaction") {
         if (raw_args.size() < 2) {
-            std::cerr << "Usage: lunar transaction <list|show <id>>\n";
+            Cli::Error("usage: lunar transaction <list|show <id>>");
             return 1;
         }
         std::string sub = raw_args[1];
         if (sub == "list") {
             auto history = core.transaction_history();
-            std::cout << "Transaction History (" << history.size() << " transactions):\n";
+            std::vector<std::vector<std::string>> rows;
             for (const auto& txn : history) {
-                std::cout << "  #" << txn.id() << "  [" << Transaction::state_name(txn.state()) << "] "
-                          << txn.description() << " (" << txn.operations().size() << " ops)\n";
+                rows.push_back({
+                    std::to_string(txn.id()),
+                    Transaction::state_name(txn.state()),
+                    std::to_string(txn.operations().size()),
+                    txn.description()
+                });
             }
+            Cli::PrintTable({"ID", "STATE", "OPS", "DESCRIPTION"}, rows);
             return 0;
         } else if (sub == "show" && raw_args.size() >= 3) {
             uint64_t id = std::stoull(raw_args[2]);
             auto txn = core.get_transaction(id);
             if (!txn) {
-                std::cerr << "Transaction #" << id << " not found\n";
+                Cli::Error("transaction not found: " + std::to_string(id));
                 return 1;
             }
-            std::cout << txn->to_string() << "\n";
+            Cli::TaskBegin("transaction", "#" + std::to_string(id));
+            Cli::PrintOperations(*txn);
+            Cli::TaskOk(Transaction::state_name(txn->state()));
             return 0;
         }
     }
@@ -590,21 +567,33 @@ int main(int argc, char* argv[]) {
     // ---- Snapshot & Rollback ----
     if (command == "snapshot") {
         if (raw_args.size() < 2) {
-            std::cerr << "Usage: lunar snapshot <list|create [desc]>\n";
+            Cli::Error("usage: lunar snapshot <list|create [desc]>");
             return 1;
         }
         std::string sub = raw_args[1];
         if (sub == "list") {
             auto snaps = core.snapshots().list();
-            std::cout << "System Snapshots (" << snaps.size() << " total):\n";
+            std::vector<std::vector<std::string>> rows;
             for (const auto& snap : snaps) {
-                std::cout << "  " << snap.to_string() << "\n";
+                std::time_t stamp = std::chrono::system_clock::to_time_t(snap.timestamp);
+                std::tm broken{};
+                localtime_r(&stamp, &broken);
+                std::ostringstream clock;
+                clock << std::put_time(&broken, "%Y-%m-%d %H:%M:%S");
+                rows.push_back({
+                    std::to_string(snap.id),
+                    clock.str(),
+                    std::to_string(snap.objects.size()),
+                    snap.description
+                });
             }
+            Cli::PrintTable({"ID", "TIME", "OBJECTS", "DESCRIPTION"}, rows);
             return 0;
         } else if (sub == "create") {
             std::string desc = (raw_args.size() >= 3) ? raw_args[2] : "Manual Snapshot";
+            Cli::TaskBegin("snapshot", desc);
             auto snap = core.create_snapshot(desc);
-            std::cout << ":: Created Snapshot " << snap.to_string() << "\n";
+            Cli::TaskOk("#" + std::to_string(snap.id));
             return 0;
         }
     }
@@ -613,46 +602,49 @@ int main(int argc, char* argv[]) {
         if (raw_args.size() < 2) {
             auto snaps = core.snapshots().list();
             if (snaps.empty()) {
-                std::cerr << "No snapshots available for rollback.\n";
+                Cli::Error("no snapshots");
                 return 1;
             }
             uint64_t latest_id = snaps.back().id;
-            std::cout << ":: Rolling back to most recent snapshot #" << latest_id << "...\n";
+            Cli::TaskBegin("rollback", "#" + std::to_string(latest_id));
             if (core.rollback(latest_id)) {
-                std::cout << ":: Rollback completed successfully.\n";
+                Cli::TaskOk("#" + std::to_string(latest_id));
                 return 0;
-            } else {
-                std::cerr << ":: Rollback failed.\n";
-                return 1;
             }
+            Cli::TaskFail("rollback failed");
+            return 1;
         } else {
             std::string snap_str = raw_args[1];
             if (!snap_str.empty() && snap_str[0] == '#') snap_str = snap_str.substr(1);
             uint64_t snap_id = std::stoull(snap_str);
-            std::cout << ":: Rolling back to snapshot #" << snap_id << "...\n";
+            Cli::TaskBegin("rollback", "#" + std::to_string(snap_id));
             if (core.rollback(snap_id)) {
-                std::cout << ":: Rollback to snapshot #" << snap_id << " completed successfully.\n";
+                Cli::TaskOk("#" + std::to_string(snap_id));
                 return 0;
-            } else {
-                std::cerr << ":: Rollback failed.\n";
-                return 1;
             }
+            Cli::TaskFail("rollback failed");
+            return 1;
         }
     }
 
     // ---- Repository ----
     if (command == "repo") {
         if (raw_args.size() < 2) {
-            std::cerr << "Usage: lunar repo <list|add|remove|enable|disable>\n";
+            Cli::Error("usage: lunar repo <list|add|remove|enable|disable>");
             return 1;
         }
         std::string sub = raw_args[1];
         if (sub == "list") {
-            std::cout << "Configured Repositories:\n";
+            std::vector<std::vector<std::string>> rows;
             for (const auto& repo : core.repositories().list()) {
-                std::cout << "  " << std::left << std::setw(15) << repo->name()
-                          << " [" << (repo->enabled() ? "enabled" : "disabled") << "]\n";
+                rows.push_back({
+                    repo->name(),
+                    repo->type_name(),
+                    repo->enabled() ? "enabled" : "disabled",
+                    repo->url()
+                });
             }
+            Cli::PrintTable({"NAME", "TYPE", "STATE", "URL"}, rows);
             return 0;
         } else if (sub == "add" && raw_args.size() >= 4) {
             std::string name = raw_args[2];
@@ -672,24 +664,29 @@ int main(int argc, char* argv[]) {
             } else {
                 core.repositories().add(std::make_shared<LocalRepository>(name, data_dir + "/repos/" + name + "/repo.db", url));
             }
-            std::cout << ":: Repository '" << name << "' (" << type << ") added: " << url << "\n";
+            Cli::TaskBegin("repo add", name);
+            Cli::TaskOk(url);
             return 0;
         } else if (sub == "add" && raw_args.size() == 3) {
             std::string name = raw_args[2];
             core.repositories().add(std::make_shared<LocalRepository>(name, data_dir + "/repos/" + name + "/repo.db"));
-            std::cout << ":: Local repository '" << name << "' added.\n";
+            Cli::TaskBegin("repo add", name);
+            Cli::TaskOk("local");
             return 0;
         } else if (sub == "remove" && raw_args.size() >= 3) {
             core.repositories().remove(raw_args[2]);
-            std::cout << ":: Repository '" << raw_args[2] << "' removed.\n";
+            Cli::TaskBegin("repo remove", raw_args[2]);
+            Cli::TaskOk(raw_args[2]);
             return 0;
         } else if (sub == "enable" && raw_args.size() >= 3) {
             core.repositories().enable(raw_args[2]);
-            std::cout << ":: Repository '" << raw_args[2] << "' enabled.\n";
+            Cli::TaskBegin("repo enable", raw_args[2]);
+            Cli::TaskOk("enabled");
             return 0;
         } else if (sub == "disable" && raw_args.size() >= 3) {
             core.repositories().disable(raw_args[2]);
-            std::cout << ":: Repository '" << raw_args[2] << "' disabled.\n";
+            Cli::TaskBegin("repo disable", raw_args[2]);
+            Cli::TaskOk("disabled");
             return 0;
         }
     }
@@ -697,42 +694,39 @@ int main(int argc, char* argv[]) {
     // ---- Extensions & Plugins ----
     if (command == "ext") {
         if (raw_args.size() < 2) {
-            std::cerr << "Usage: lunar ext <list|load <path.so>|run <name> [args...]>\n";
+            Cli::Error("usage: lunar ext <list|load|run> ...");
             return 1;
         }
         std::string sub = raw_args[1];
         if (sub == "list") {
-            std::cout << "Installed Extensions & Plugins:\n";
+            std::vector<std::vector<std::string>> rows;
             for (const auto& ext : core.extensions().list_extensions()) {
-                std::cout << "  " << std::left << std::setw(20) << ext.name
-                          << " (v" << ext.version << ") - " << ext.description;
-                if (!ext.file_path.empty()) {
-                    std::cout << " [" << ext.file_path << "]";
-                }
-                std::cout << "\n";
+                rows.push_back({ext.name, ext.version, ext.description, ext.file_path});
             }
+            Cli::PrintTable({"NAME", "VERSION", "DESCRIPTION", "PATH"}, rows);
             return 0;
         } else if (sub == "load" && raw_args.size() >= 3) {
             std::string so_path = raw_args[2];
+            Cli::TaskBegin("ext load", so_path);
             if (core.extensions().load_plugin(so_path)) {
-                std::cout << ":: Plugin '" << so_path << "' loaded successfully.\n";
+                Cli::TaskOk(so_path);
                 return 0;
-            } else {
-                std::cerr << "Error: Failed to load plugin " << so_path << "\n";
-                return 1;
             }
+            Cli::TaskFail("failed to load plugin");
+            return 1;
         } else if (sub == "run" && raw_args.size() >= 3) {
             std::string name = raw_args[2];
             std::vector<std::string> ext_args(raw_args.begin() + 3, raw_args.end());
+            Cli::TaskBegin("ext run", name);
             if (core.extensions().execute_operation(name, ext_args)) {
+                Cli::TaskOk(name);
                 return 0;
-            } else {
-                std::cerr << "Extension execution failed: " << name << "\n";
-                return 1;
             }
+            Cli::TaskFail("extension failed");
+            return 1;
         }
     }
 
-    std::cerr << "Unknown command: " << command << ". Run 'lunar --help' for usage.\n";
+    Cli::Error("unknown command: " + command);
     return 1;
 }
