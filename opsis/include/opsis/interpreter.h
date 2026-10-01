@@ -27,7 +27,7 @@ struct RuntimeConfig {
 /**
  * PackageScene 描述一次生命周期调用带给脚本的包身份。
  * 字段为空时不覆盖 RuntimeConfig 里已有的值。
- * Architecture 为空时，脚本里的 Context.Architecture 使用 x86_64。
+ * Architecture 为空时，脚本里的 Context.Architecture 使用 HostArchitecture()。
  */
 struct PackageScene {
 	std::string Namespace;
@@ -38,6 +38,13 @@ struct PackageScene {
 	std::string Architecture;
 	std::string Reason;
 };
+
+/**
+ * HostArchitecture() - 返回这份程序编译目标的架构名。
+ *
+ * Return: x86_64、aarch64 或 riscv64。其它目标返回 uname 的机器名。
+ */
+const char *HostArchitecture();
 
 /**
  * LoadConfig() - 从环境变量填安装根和记录目录。

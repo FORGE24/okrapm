@@ -1,6 +1,7 @@
 #include "opsis/interpreter.h"
 
 #include <sys/statvfs.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -29,6 +30,9 @@
 namespace fs = std::filesystem;
 
 namespace Opsis {
+
+const char *HostArchitecture();
+
 namespace {
 
 struct RuntimeError : std::runtime_error {
@@ -2344,7 +2348,7 @@ std::string ConfigOrEnv(const std::string &Field, const char *Name)
 
 bool PackageToken(const std::string &Text)
 {
-	if (Text.empty()) return false;
+	if (Text.empty() || !std::isalnum(static_cast<unsigned char>(Text[0]))) return false;
 	for (unsigned char Ch : Text) {
 		if (std::isalnum(Ch) || Ch == '.' || Ch == '_' || Ch == '-' || Ch == '+') continue;
 		return false;
@@ -2446,7 +2450,7 @@ void BeginDirectPackage(Interpreter &Machine, const std::vector<Value> &Args, in
 	std::string Description = ConfigOrEnv(Machine.Config().PackageDescription, "OPSIS_PKG_DESCRIPTION");
 	if (Description.empty()) Description = Name + " direct package";
 	std::string Architecture = ConfigOrEnv(Machine.Config().PackageArchitecture, "OPSIS_PKG_ARCH");
-	if (Architecture.empty()) Architecture = "x86_64";
+	if (Architecture.empty()) Architecture = HostArchitecture();
 	fs::path Stage = fs::temp_directory_path() / ("opsis-direct-" + std::to_string(getpid()));
 	PackageSession.Stage = Stage;
 	std::error_code Error;
@@ -3059,7 +3063,7 @@ void Interpreter::BindContext()
 	std::string NewVersion = Config_.NewVersion.empty() ? Config_.PackageVersion : Config_.NewVersion;
 	Put("Entry", Entry);
 	Put("Sysroot", Config_.Sysroot);
-	Put("Architecture", Config_.PackageArchitecture.empty() ? "x86_64" : Config_.PackageArchitecture);
+	Put("Architecture", Config_.PackageArchitecture.empty() ? HostArchitecture() : Config_.PackageArchitecture);
 	Put("Namespace", Config_.PackageNamespace);
 	Put("Name", Config_.PackageName);
 	Put("Version", Config_.PackageVersion);
@@ -3209,6 +3213,25 @@ fs::path FindEntryProgram(const fs::path &Root, const std::string &Entry)
 }
 
 } // namespace
+
+const char *HostArchitecture()
+{
+#if defined(__aarch64__)
+	return "aarch64";
+#elif defined(__riscv) && defined(__riscv_xlen) && (__riscv_xlen == 64)
+	return "riscv64";
+#elif defined(__x86_64__)
+	return "x86_64";
+#else
+	static std::string Name;
+	if (Name.empty()) {
+		utsname Info{};
+		if (uname(&Info) == 0 && Info.machine[0] != '\0') Name = Info.machine;
+		else Name = "unknown";
+	}
+	return Name.c_str();
+#endif
+}
 
 RuntimeConfig LoadConfig()
 {

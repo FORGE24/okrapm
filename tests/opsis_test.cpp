@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -850,6 +851,138 @@ void TestLanguageForms()
 	std::cout << "[PASS] TestLanguageForms\n";
 }
 
+void TestTransactionRollback()
+{
+	fs::path Root = fs::temp_directory_path() / "opsis-rollback";
+	fs::remove_all(Root);
+	fs::path Sysroot = Root / "sysroot";
+	fs::path Data = Root / "lunar";
+	fs::create_directories(Sysroot);
+	fs::path Package = Root / "pkg";
+	WriteFile(Package / "files/usr/bin/tool", "old\n");
+	WriteFile(Package / "files/usr/share/keep", "stay\n");
+	WriteFile(Package / "meta.yaml",
+		"name: tool\nnamespace: app\nversion: 1.0.0\ndescription: \"tool\"\n");
+	WriteFile(Package / "scripts/install.opsis",
+		"public class Package {\n"
+		"    public void INSTALL() { WriteFile(\"/usr/share/arch\", Context.Architecture); }\n"
+		"}\n");
+	WriteFile(Package / "scripts/remove.opsis",
+		"public class Package {\n"
+		"    public void REMOVE() { WriteFile(\"/var/gone\", \"v1-remove\"); }\n"
+		"}\n");
+	okrapm::ArtifactBuilder::BuildOptions Options;
+	Options.compression = "gzip";
+	Options.output_path = (Root / "tool.oaa").string();
+	auto Built = okrapm::ArtifactBuilder::build(Package.string(), Options);
+	assert(Built.has_value());
+	unsetenv("OPSIS_DB_DIR");
+	setenv("LUNAR_INSTALL_ROOT", Sysroot.c_str(), 1);
+	okrapm::LunarCore Core(Data.string());
+	assert(Core.install({*Built}).success);
+	assert(ReadLine(Sysroot / "usr/bin/tool") == "old");
+	assert(ReadLine(Sysroot / "usr/share/arch") == Opsis::HostArchitecture());
+	assert(fs::is_regular_file(Data / "pkg-scripts/app/tool/scripts/remove.opsis"));
+
+	fs::path Next = Root / "next";
+	WriteFile(Next / "files/usr/bin/tool", "new\n");
+	WriteFile(Next / "files/usr/bin/extra", "extra\n");
+	WriteFile(Next / "meta.yaml",
+		"name: tool\nnamespace: app\nversion: 2.0.0\narchitecture: riscv64\ndescription: \"tool\"\n");
+	WriteFile(Next / "scripts/upgrade.opsis",
+		"public class Package {\n"
+		"    public void UPDATE() { Fail(\"update-failed\"); }\n"
+		"}\n");
+	WriteFile(Next / "scripts/remove.opsis",
+		"public class Package {\n"
+		"    public void REMOVE() { WriteFile(\"/var/gone\", \"v2-remove\"); }\n"
+		"}\n");
+	Options.output_path = (Root / "next.oaa").string();
+	auto NextBuilt = okrapm::ArtifactBuilder::build(Next.string(), Options);
+	assert(NextBuilt.has_value());
+	assert(!Core.install({*NextBuilt}).success);
+	assert(ReadLine(Sysroot / "usr/bin/tool") == "old");
+	assert(ReadLine(Sysroot / "usr/share/keep") == "stay");
+	assert(!fs::exists(Sysroot / "usr/bin/extra"));
+	assert(Core.info("app.tool")->version().to_string() == "1.0.0");
+	{
+		std::ifstream Script(Data / "pkg-scripts/app/tool/scripts/remove.opsis");
+		std::string Text((std::istreambuf_iterator<char>(Script)), std::istreambuf_iterator<char>());
+		assert(Text.find("v1-remove") != std::string::npos);
+	}
+
+	fs::path Saved = Root / "savedb";
+	fs::copy(Data / "system.db", Saved);
+	fs::remove(Data / "system.db");
+	fs::create_directory(Data / "system.db");
+	fs::path StoreBreak = Root / "store";
+	WriteFile(StoreBreak / "files/usr/bin/tool", "new\n");
+	WriteFile(StoreBreak / "files/usr/bin/extra", "extra\n");
+	WriteFile(StoreBreak / "meta.yaml",
+		"name: tool\nnamespace: app\nversion: 2.0.0\ndescription: \"tool\"\n");
+	WriteFile(StoreBreak / "scripts/upgrade.opsis",
+		"public class Package {\n"
+		"    public void UPDATE() { WriteFile(\"/usr/share/marker\", \"ran\"); }\n"
+		"}\n");
+	WriteFile(StoreBreak / "scripts/remove.opsis",
+		"public class Package {\n"
+		"    public void REMOVE() { WriteFile(\"/var/gone\", \"v2-remove\"); }\n"
+		"}\n");
+	Options.output_path = (Root / "store.oaa").string();
+	auto StoreBuilt = okrapm::ArtifactBuilder::build(StoreBreak.string(), Options);
+	assert(StoreBuilt.has_value());
+	assert(!Core.install({*StoreBuilt}).success);
+	assert(ReadLine(Sysroot / "usr/bin/tool") == "old");
+	assert(!fs::exists(Sysroot / "usr/bin/extra"));
+	{
+		std::ifstream Script(Data / "pkg-scripts/app/tool/scripts/remove.opsis");
+		std::string Text((std::istreambuf_iterator<char>(Script)), std::istreambuf_iterator<char>());
+		assert(Text.find("v1-remove") != std::string::npos);
+	}
+	fs::remove_all(Data / "system.db");
+	fs::copy(Saved, Data / "system.db");
+
+	fs::path Dotted = Root / "dotted";
+	WriteFile(Dotted / "files/usr/bin/dotted", "ok\n");
+	WriteFile(Dotted / "meta.yaml",
+		"name: foo..bar\nnamespace: app\nversion: 1.0.0\ndescription: \"dotted\"\n");
+	WriteFile(Dotted / "scripts/install.opsis",
+		"public class Package { public void INSTALL() {} }\n");
+	Options.output_path = (Root / "dotted.oaa").string();
+	auto DottedBuilt = okrapm::ArtifactBuilder::build(Dotted.string(), Options);
+	assert(DottedBuilt.has_value());
+	assert(Core.install({*DottedBuilt}).success);
+	assert(fs::is_directory(Data / "pkg-scripts/app/foo..bar"));
+
+	fs::path Hidden = Root / "hidden";
+	WriteFile(Hidden / "files/usr/bin/hidden", "no\n");
+	WriteFile(Hidden / "meta.yaml",
+		"name: .hidden\nnamespace: app\nversion: 1.0.0\ndescription: \"hidden\"\n");
+	Options.output_path = (Root / "hidden.oaa").string();
+	auto HiddenBuilt = okrapm::ArtifactBuilder::build(Hidden.string(), Options);
+	assert(HiddenBuilt.has_value());
+	assert(!Core.install({*HiddenBuilt}).success);
+	assert(!fs::exists(Sysroot / "usr/bin/hidden"));
+	assert(!Core.info("app..hidden").has_value());
+
+	fs::path Arch = Root / "arch";
+	WriteFile(Arch / "meta.yaml",
+		"name: archpkg\nnamespace: app\nversion: 1.0.0\narchitecture: riscv64\ndescription: \"arch\"\n");
+	WriteFile(Arch / "scripts/install.opsis",
+		"public class Package {\n"
+		"    public void INSTALL() { WriteFile(\"/usr/share/declared\", Context.Architecture); }\n"
+		"}\n");
+	Options.output_path = (Root / "arch.oaa").string();
+	auto ArchBuilt = okrapm::ArtifactBuilder::build(Arch.string(), Options);
+	assert(ArchBuilt.has_value());
+	assert(Core.install({*ArchBuilt}).success);
+	assert(ReadLine(Sysroot / "usr/share/declared") == "riscv64");
+
+	unsetenv("LUNAR_INSTALL_ROOT");
+	fs::remove_all(Root);
+	std::cout << "[PASS] TestTransactionRollback\n";
+}
+
 } // namespace
 
 int main()
@@ -863,6 +996,7 @@ int main()
 	TestRemoveAndUpgrade();
 	TestEntryContract();
 	TestLanguageForms();
+	TestTransactionRollback();
 	std::cout << "OPSIS tests passed\n";
 	return 0;
 }
