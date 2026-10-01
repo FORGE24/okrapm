@@ -94,10 +94,18 @@ private:
     ExtensionApi() = default;
     ~ExtensionApi();
 
+    struct LoadedPlugin {
+        void* handle{nullptr};
+        bool oaabi{false};
+        void (*fini)(){nullptr};
+    };
+
+    bool load_oaabi_plugin(const std::string& so_path);
+
     std::vector<ExtensionInfo> extensions_;
     std::unordered_map<HookType, std::vector<HookCallback>> hooks_;
     std::unordered_map<std::string, std::pair<std::string, OperationHandler>> operations_;
-    std::vector<void*> plugin_handles_;
+    std::vector<LoadedPlugin> plugin_handles_;
 };
 
 } // namespace okrapm

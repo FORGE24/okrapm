@@ -1,4 +1,5 @@
 #include "okrapmlib/extension_api.h"
+#include "oaabi/oaabi.h"
 #include <iostream>
 #include <dlfcn.h>
 #include <filesystem>
@@ -87,9 +88,8 @@ bool ExtensionApi::load_plugin(const std::string& so_path) {
     // 查找入口函数
     PluginInitFunc init_fn = reinterpret_cast<PluginInitFunc>(dlsym(handle, "lunar_plugin_init"));
     if (!init_fn) {
-        std::cerr << "Plugin " << so_path << " missing 'lunar_plugin_init' symbol: " << dlerror() << "\n";
         dlclose(handle);
-        return false;
+        return load_oaabi_plugin(so_path);
     }
 
     if (!init_fn(this)) {
@@ -98,12 +98,44 @@ bool ExtensionApi::load_plugin(const std::string& so_path) {
         return false;
     }
 
-    plugin_handles_.push_back(handle);
+    plugin_handles_.push_back({handle, false, nullptr});
 
     std::string stem = fs::path(so_path).stem().string();
     if (stem.rfind("lib", 0) == 0) stem = stem.substr(3);
     register_extension({stem, "1.0.0", "Dynamic shared plugin", ExtensionType::Plugin, so_path});
 
+    return true;
+}
+
+bool ExtensionApi::load_oaabi_plugin(const std::string& so_path) {
+    // 旧入口保持 RTLD_GLOBAL。OAABI 入口按规范用立即绑定和局部符号。
+    void* handle = dlopen(so_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle) {
+        std::cerr << "Failed to load OAABI plugin " << so_path << ": " << dlerror() << "\n";
+        return false;
+    }
+
+    auto* plugin = reinterpret_cast<const OaabiPlugin*>(dlsym(handle, "OaabiPlugin"));
+    if (!plugin) {
+        std::cerr << "Plugin " << so_path << " missing 'lunar_plugin_init' or 'OaabiPlugin'\n";
+        dlclose(handle);
+        return false;
+    }
+    if (plugin->Version != OaabiVersion || plugin->Reserved != 0 || !plugin->Init) {
+        std::cerr << "Plugin " << so_path << " has an unsupported OaabiPlugin entry\n";
+        dlclose(handle);
+        return false;
+    }
+    if (plugin->Init() != 0) {
+        std::cerr << "OAABI plugin initialization failed: " << so_path << "\n";
+        dlclose(handle);
+        return false;
+    }
+
+    plugin_handles_.push_back({handle, true, plugin->Fini});
+    std::string stem = fs::path(so_path).stem().string();
+    if (stem.rfind("lib", 0) == 0) stem = stem.substr(3);
+    register_extension({stem, "1.0.0", "OAABI plugin", ExtensionType::Plugin, so_path});
     return true;
 }
 
@@ -124,14 +156,16 @@ size_t ExtensionApi::load_plugins_from_directory(const std::string& dir_path) {
 }
 
 void ExtensionApi::unload_all() {
-    for (void* handle : plugin_handles_) {
-        if (handle) {
-            PluginCleanupFunc cleanup_fn = reinterpret_cast<PluginCleanupFunc>(dlsym(handle, "lunar_plugin_cleanup"));
-            if (cleanup_fn) {
-                cleanup_fn();
-            }
-            dlclose(handle);
+    for (const LoadedPlugin& plugin : plugin_handles_) {
+        if (!plugin.handle) continue;
+        if (plugin.oaabi) {
+            if (plugin.fini) plugin.fini();
+        } else {
+            PluginCleanupFunc cleanup_fn = reinterpret_cast<PluginCleanupFunc>(
+                dlsym(plugin.handle, "lunar_plugin_cleanup"));
+            if (cleanup_fn) cleanup_fn();
         }
+        dlclose(plugin.handle);
     }
     plugin_handles_.clear();
 }

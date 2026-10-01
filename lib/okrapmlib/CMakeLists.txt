@@ -18,6 +18,8 @@ add_library(okrapmlib
 target_include_directories(okrapmlib
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
 )
 
 target_link_libraries(okrapmlib

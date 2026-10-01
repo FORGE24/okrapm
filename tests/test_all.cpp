@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <cassert>
+#include <cstdlib>
 #include <filesystem>
 #include "okrapmlib/version.h"
 #include "okrapmlib/object.h"
@@ -318,6 +319,56 @@ void test_extension_and_hooks() {
     std::cout << "[PASS] test_extension_and_hooks\n";
 }
 
+void test_plugin_entries() {
+    auto& ext = ExtensionApi::instance();
+    fs::path dir = fs::temp_directory_path() / "lunar-plugin-marks";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    fs::path legacy = dir / "legacy";
+    fs::path oaabi = dir / "oaabi";
+    setenv("LEGACY_PLUGIN_MARK", legacy.c_str(), 1);
+    setenv("OAABI_MARK", oaabi.c_str(), 1);
+
+    assert(ext.load_plugin(LEGACY_PLUGIN_PATH));
+    {
+        std::ifstream input(legacy);
+        std::string text;
+        std::getline(input, text);
+        assert(text == "legacy");
+    }
+
+    assert(ext.load_plugin(OAABI_PLUGIN_PATH));
+    {
+        std::ifstream input(oaabi);
+        std::string text;
+        std::getline(input, text);
+        assert(text == "init");
+    }
+
+    assert(!ext.load_plugin(OAABI_BAD_PLUGIN_PATH));
+    {
+        std::ifstream input(oaabi);
+        std::string text;
+        std::getline(input, text);
+        assert(text == "init");
+    }
+
+    ext.unload_all();
+    {
+        std::ifstream input(oaabi);
+        std::string init, fini;
+        std::getline(input, init);
+        std::getline(input, fini);
+        assert(init == "init");
+        assert(fini == "fini");
+    }
+
+    unsetenv("LEGACY_PLUGIN_MARK");
+    unsetenv("OAABI_MARK");
+    fs::remove_all(dir);
+    std::cout << "[PASS] test_plugin_entries\n";
+}
+
 void test_pipeline_engine() {
     std::string core_dir = "/tmp/lunar_pipe_test";
     fs::remove_all(core_dir);
@@ -505,6 +556,7 @@ int main() {
     test_pipeline_engine();
     test_network_downloader();
     test_remote_repository_and_distribution();
+    test_plugin_entries();
     std::cout << "All Lunar tests passed successfully (100%)!\n";
     return 0;
 }

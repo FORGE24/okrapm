@@ -135,7 +135,7 @@ bool OaaCore::init_skeleton(const std::string& dir, const OaaMeta& initial_meta)
 
         std::ofstream install_opsis(dir + "/scripts/install.opsis");
         install_opsis << "public class Package {\n"
-                      << "    public void Install() {\n"
+                      << "    public void INSTALL() {\n"
                       << "        CheckUser();\n"
                       << "        InstallDirectory(\"rootfs\", \"/\");\n"
                       << "        UpdateLdconfig();\n"

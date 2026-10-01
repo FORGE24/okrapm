@@ -1,0 +1,9 @@
+public class Package {
+	public int MAIN(BuildContext ctx) {
+		BeginPackage();
+		PackFile(Environment("OPSIS_BIN_LUNAR"), "/usr/bin/lunar", "0755");
+		PackFile(Environment("OPSIS_BIN_OPSIS"), "/usr/bin/opsis", "0755");
+		FinishPackage();
+		return 0;
+	}
+}

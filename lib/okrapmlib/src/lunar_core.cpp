@@ -502,18 +502,81 @@ bool LunarCore::commit_transaction(Transaction& txn) {
         return install_root;
     };
 
-    // 先复制 payload，再执行包内 scripts/install.opsis。脚本失败则整次提交回滚。
-    auto apply_package = [&](const fs::path& staging, std::vector<fs::path>& created) -> const char* {
+    auto script_exists = [](const fs::path& staging, const std::string& stem) {
+        return fs::is_regular_file(staging / "scripts" / (stem + ".opsis"))
+            || fs::is_regular_file(staging / (stem + ".opsis"));
+    };
+    auto safe_name = [](const std::string& text) {
+        return !text.empty() && text.find('/') == std::string::npos && text.find("..") == std::string::npos;
+    };
+    auto read_architecture = [](const fs::path& staging) {
+        std::ifstream input(staging / "meta.yaml");
+        std::string line;
+        const std::string key = "architecture:";
+        while (std::getline(input, line)) {
+            if (line.compare(0, key.size(), key) != 0) continue;
+            std::string value = line.substr(key.size());
+            auto start = value.find_first_not_of(" \t");
+            if (start == std::string::npos) break;
+            value = value.substr(start);
+            if (!value.empty() && value.front() == '"') value.erase(value.begin());
+            if (!value.empty() && value.back() == '"') value.pop_back();
+            if (!value.empty()) return value;
+        }
+        return std::string("x86_64");
+    };
+    auto scene_for = [&](const Operation& op, const fs::path& staging, const std::string& entry) {
+        Opsis::PackageScene scene;
+        scene.Namespace = op.target().ns();
+        scene.Name = op.target().name();
+        scene.Version = op.target().version().to_string();
+        scene.NewVersion = scene.Version;
+        if (auto current = system_store_->find(op.target().ns(), op.target().name())) {
+            scene.OldVersion = current->version().to_string();
+        }
+        scene.Architecture = read_architecture(staging);
+        scene.Reason = entry;
+        return scene;
+    };
+    auto keep_program = [&](const fs::path& staging, const Object& target) {
+        if (!safe_name(target.ns()) || !safe_name(target.name())) return;
+        fs::path dest_root = fs::path(data_dir_) / "pkg-scripts" / target.ns() / target.name();
+        std::error_code ec;
+        fs::remove_all(dest_root, ec);
+        const char* names[] = {
+            "package.opsis", "lifecycle.opsis", "install.opsis", "update.opsis", "upgrade.opsis", "remove.opsis"
+        };
+        for (const char* name : names) {
+            for (const fs::path& rel : {fs::path(name), fs::path("scripts") / name}) {
+                fs::path src = staging / rel;
+                if (!fs::is_regular_file(src)) continue;
+                fs::path dest = dest_root / rel;
+                fs::create_directories(dest.parent_path(), ec);
+                if (!ec) fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+            }
+        }
+        if (fs::is_directory(staging / "lib")) {
+            fs::copy(staging / "lib", dest_root / "lib",
+                fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        }
+    };
+
+    // 安装先复制 payload。新安装调用 INSTALL，已安装对象调用 UPDATE。没有对应入口时走默认行为。
+    auto apply_package = [&](const fs::path& staging, std::vector<fs::path>& created, const Operation& op,
+        bool upgrade) -> const char* {
         fs::path payload = fs::exists(staging / "files") ? staging / "files" : staging / "rootfs";
         bool has_payload = fs::is_directory(payload);
-        bool has_opsis = fs::is_regular_file(staging / "scripts/install.opsis")
-            || fs::is_regular_file(staging / "install.opsis");
+        bool has_opsis = script_exists(staging, "package") || script_exists(staging, "lifecycle")
+            || script_exists(staging, "install") || script_exists(staging, "update")
+            || script_exists(staging, "upgrade") || script_exists(staging, "remove");
         if (!has_payload && !has_opsis) return "package has no payload or install.opsis";
         if (has_payload && !copy_payload(payload, install_root_for(), created)) {
             return "Artifact installation failed or file conflict detected";
         }
-        if (Opsis::RunPackageScript(staging.string(), install_root_for().string(), false) != 0) {
-            return "OPSIS install script failed";
+        std::string entry = upgrade ? "UPDATE" : "INSTALL";
+        Opsis::PackageScene scene = scene_for(op, staging, entry);
+        if (Opsis::RunLifecycleScript(staging.string(), entry, install_root_for().string(), false, scene) != 0) {
+            return entry == "UPDATE" ? "OPSIS update script failed" : "OPSIS install script failed";
         }
         return nullptr;
     };
@@ -533,12 +596,16 @@ bool LunarCore::commit_transaction(Transaction& txn) {
                     auto staging = fs::temp_directory_path() / ("lunar-install-" + std::to_string(txn.id()));
                     std::vector<fs::path> created;
                     bool extracted = ArtifactExtractor::extract(local_path, staging.string());
-                    const char* package_error = extracted ? apply_package(staging, created) : "Local artifact installation failed";
+                    bool upgrade = op.type() == OperationType::Update || op.type() == OperationType::Upgrade
+                        || system_store_->is_installed(op.target().ns(), op.target().name());
+                    const char* package_error = extracted ? apply_package(staging, created, op, upgrade)
+                                                          : "Local artifact installation failed";
                     if (package_error) {
                         rollback_files(created);
                         fs::remove_all(staging);
                         return fail_transaction(package_error);
                     }
+                    keep_program(staging, op.target());
                     fs::remove_all(staging);
                     installed_artifacts.push_back(std::move(created));
                 } else if (op.target().repository() == "local-artifact") {
@@ -554,12 +621,16 @@ bool LunarCore::commit_transaction(Transaction& txn) {
                         auto staging = fs::temp_directory_path() / ("lunar-install-" + std::to_string(txn.id()) + "-" + op.target().name());
                         std::vector<fs::path> created;
                         bool extracted = ArtifactExtractor::extract(*art_path, staging.string());
-                        const char* package_error = extracted ? apply_package(staging, created) : "Artifact installation failed";
+                        bool upgrade = op.type() == OperationType::Update || op.type() == OperationType::Upgrade
+                            || system_store_->is_installed(op.target().ns(), op.target().name());
+                        const char* package_error = extracted ? apply_package(staging, created, op, upgrade)
+                                                              : "Artifact installation failed";
                         if (package_error) {
                             rollback_files(created);
                             fs::remove_all(staging);
                             return fail_transaction(package_error);
                         }
+                        keep_program(staging, op.target());
                         fs::remove_all(staging);
                         installed_artifacts.push_back(std::move(created));
                     }
@@ -568,9 +639,25 @@ bool LunarCore::commit_transaction(Transaction& txn) {
                 break;
             }
             case OperationType::Remove:
-            case OperationType::Purge:
+            case OperationType::Purge: {
+                if (safe_name(op.target().ns()) && safe_name(op.target().name())) {
+                    fs::path saved = fs::path(data_dir_) / "pkg-scripts" / op.target().ns() / op.target().name();
+                    Opsis::PackageScene scene;
+                    scene.Namespace = op.target().ns();
+                    scene.Name = op.target().name();
+                    if (auto current = system_store_->find(op.target().ns(), op.target().name())) {
+                        scene.Version = current->version().to_string();
+                        scene.OldVersion = scene.Version;
+                    }
+                    scene.Reason = "REMOVE";
+                    if (Opsis::RunLifecycleScript(saved.string(), "REMOVE", install_root_for().string(),
+                        false, scene) != 0) {
+                        return fail_transaction("OPSIS remove script failed");
+                    }
+                }
                 pending_store.push_back(op);
                 break;
+            }
         }
     }
 
@@ -595,6 +682,12 @@ bool LunarCore::commit_transaction(Transaction& txn) {
     if (!system_store_->save()) {
         system_store_->load();
         return fail_transaction("Failed to persist system store");
+    }
+    for (const auto& op : pending_store) {
+        if (op.type() != OperationType::Remove && op.type() != OperationType::Purge) continue;
+        if (!safe_name(op.target().ns()) || !safe_name(op.target().name())) continue;
+        std::error_code ec;
+        fs::remove_all(fs::path(data_dir_) / "pkg-scripts" / op.target().ns() / op.target().name(), ec);
     }
 
     system_store_->advance_state_id();
